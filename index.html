@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bitcoin Message Signer & Verifier</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 40px; }
+textarea,input { width: 100%; margin-bottom: 10px; }
+button { padding: 5px 10px; }
+.result { background: #f0f0f0; padding: 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>Bitcoin Message Signer & Verifier</h1>
+<section>
+<h2>Sign a Message</h2>
+<textarea id="sign-message" placeholder="Message"></textarea>
+<input type="text" id="sign-priv" placeholder="Private Key (hex or WIF)">
+<button id="sign-btn">Sign</button>
+<div id="sign-output" class="result"></div>
+</section>
+<section>
+<h2>Verify a Signature</h2>
+<textarea id="verify-message" placeholder="Message"></textarea>
+<input type="text" id="verify-signature" placeholder="Signature (Base64)">
+<input type="text" id="verify-address" placeholder="Address">
+<button id="verify-btn">Verify</button>
+<div id="verify-output" class="result"></div>
+</section>
+<script>
+"use strict";
+// Helper to concatenate Uint8Arrays
+function concatBytes(...arrays){
+  let len = arrays.reduce((a,b)=>a+b.length,0);
+  let res = new Uint8Array(len);
+  let off = 0;
+  for(let a of arrays){ res.set(a, off); off += a.length; }
+  return res;
+}
+function hexToBytes(hex){
+  if(hex.startsWith('0x')) hex = hex.slice(2);
+  if(hex.length % 2) hex = '0' + hex;
+  let arr = new Uint8Array(hex.length/2);
+  for(let i=0;i<arr.length;i++) arr[i] = parseInt(hex.substr(i*2,2),16);
+  return arr;
+}
+function bytesToHex(bytes){
+  return Array.from(bytes).map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+function bytesToBigInt(bytes){
+  return BigInt('0x'+bytesToHex(bytes));
+}
+function bigIntToBytes(num, len){
+  let hex = num.toString(16);
+  if(hex.length>len*2) throw new Error('bigint too big');
+  while(hex.length < len*2) hex = '0'+hex;
+  return hexToBytes(hex);
+}
+const BASE58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function base58Encode(bytes){
+  let num = bytesToBigInt(bytes);
+  let out='';
+  while(num>0n){
+    let mod = num % 58n;
+    num = num/58n;
+    out = BASE58[Number(mod)] + out;
+  }
+  for(let b of bytes){ if(b===0){ out='1'+out; } else break; }
+  return out;
+}
+function base58Decode(str){
+  let num=0n;
+  for(let ch of str){
+    let val=BASE58.indexOf(ch);
+    if(val<0) throw new Error('invalid base58');
+    num = num*58n + BigInt(val);
+  }
+  let hex=num.toString(16);
+  if(hex.length%2) hex='0'+hex;
+  let bytes=hexToBytes(hex);
+  let leading=0;
+  for(let ch of str){ if(ch==='1') leading++; else break; }
+  if(leading){
+    let zeros=new Uint8Array(leading);
+    bytes=concatBytes(zeros,bytes);
+  }
+  return bytes;
+}
+async function sha256(bytes){
+  let buf = await crypto.subtle.digest('SHA-256', bytes);
+  return new Uint8Array(buf);
+}
+async function doubleSha256(bytes){
+  return sha256(await sha256(bytes));
+}
+function ripemd160(msg){
+  function rotl(x,n){return (x<<n)|(x>>>32-n);}
+  const r1=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13];
+  const r2=[5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11];
+  const s1=[11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6];
+  const s2=[8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11];
+  function f(j,x,y,z){if(j<=15) return x^y^z; if(j<=31) return (x&y)|(~x&z); if(j<=47) return (x|~y)^z; if(j<=63) return (x&z)|(y&~z); return x^(y|~z);}
+  function K1(j){if(j<=15) return 0x00000000; if(j<=31) return 0x5a827999; if(j<=47) return 0x6ed9eba1; if(j<=63) return 0x8f1bbcdc; return 0xa953fd4e;}
+  function K2(j){if(j<=15) return 0x50a28be6; if(j<=31) return 0x5c4dd124; if(j<=47) return 0x6d703ef3; if(j<=63) return 0x7a6d76e9; return 0x00000000;}
+  let data=Uint8Array.from(msg);
+  let len=data.length; let withOne=concatBytes(data,Uint8Array.of(0x80));
+  let padLen=(56-(withOne.length%64)+64)%64;
+  let lenBytes=new Uint8Array(8);
+  new DataView(lenBytes.buffer).setUint32(0,len<<3,true);
+  new DataView(lenBytes.buffer).setUint32(4,Math.floor(len/0x20000000),true);
+  let msgBytes=concatBytes(withOne,new Uint8Array(padLen),lenBytes);
+  let h0=0x67452301|0,h1=0xefcdab89|0,h2=0x98badcfe|0,h3=0x10325476|0,h4=0xc3d2e1f0|0;
+  for(let i=0;i<msgBytes.length;i+=64){
+    let words=new Array(16);
+    for(let j=0;j<16;j++) words[j]=new DataView(msgBytes.buffer,i+4*j,4).getUint32(0,true);
+    let al=h0,bl=h1,cl=h2,dl=h3,el=h4; let ar=h0,br=h1,cr=h2,dr=h3,er=h4;
+    for(let j=0;j<80;j++){
+      let t=rotl((al+f(j,bl,cl,dl)+words[r1[j]]+K1(j))|0,s1[j])+el|0; al=el; el=dl; dl=rotl(cl,10); cl=bl; bl=t;
+      t=rotl((ar+f(79-j,br,cr,dr)+words[r2[j]]+K2(j))|0,s2[j])+er|0; ar=er; er=dr; dr=rotl(cr,10); cr=br; br=t;
+    }
+    let t=(h1+cl+dr)|0; h1=(h2+dl+er)|0; h2=(h3+el+ar)|0; h3=(h4+al+br)|0; h4=(h0+bl+cr)|0; h0=t;
+  }
+  let out=new Uint8Array(20);
+  let view=new DataView(out.buffer);
+  view.setUint32(0,h0,true); view.setUint32(4,h1,true); view.setUint32(8,h2,true); view.setUint32(12,h3,true); view.setUint32(16,h4,true);
+  return out;
+}
+function varint(n){
+  if(n<0xfd) return Uint8Array.of(n);
+  if(n<=0xffff){ let b=new Uint8Array(3); b[0]=0xfd; new DataView(b.buffer).setUint16(1,n,true); return b; }
+  if(n<=0xffffffff){ let b=new Uint8Array(5); b[0]=0xfe; new DataView(b.buffer).setUint32(1,n,true); return b; }
+  let b=new Uint8Array(9); b[0]=0xff; new DataView(b.buffer).setBigUint64(1,BigInt(n),true); return b;
+}
+async function bitcoinMessageHash(message){
+  let enc=new TextEncoder();
+  let msg=enc.encode(message);
+  let prefix=enc.encode('Bitcoin Signed Message:\n');
+  let data=concatBytes(Uint8Array.of(0x18),prefix,varint(msg.length),msg);
+  return doubleSha256(data);
+}
+function modInv(a, m){
+  let [lm, hm] = [1n,0n];
+  let [low, high] = [((a%m)+m)%m, m];
+  while(low>1n){ let r=high/low; [lm, hm] = [hm - lm*r, lm]; [low, high] = [high - low*r, low]; }
+  return lm% m;
+}
+class Point{
+  constructor(x,y){this.x=x;this.y=y;}
+  equals(p){return this.x===p.x && this.y===p.y;}
+  add(other){
+    const p=P;
+    let slope;
+    if(this.equals(other)){
+      slope=((3n*this.x*this.x + A) * modInv(2n*this.y,p))%p;
+    }else{
+      slope=((other.y - this.y) * modInv((other.x - this.x)%p,p))%p;
+    }
+    let x=(slope*slope - this.x - other.x)%p;
+    let y=(slope*(this.x - x) - this.y)%p;
+    x=(x+p)%p; y=(y+p)%p;
+    return new Point(x,y);
+  }
+  multiply(n){
+    let result=this; let acc=1n; let prev=[];
+    while(acc<n){
+      prev.push([acc,result]);
+      if(2n*acc<=n){ result=result.add(result); acc*=2n; }
+      else{
+        let nextC=1n; let nextP=this;
+        for(let [c,p] of prev){ if(c+acc<=n && p.x!==result.x && c>nextC){ nextC=c; nextP=p; } }
+        result=result.add(nextP); acc+=nextC;
+      }
+    }
+    return result;
+  }
+}
+const A=0n; const B=7n; const P=BigInt('0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f');
+const N=BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+const Gx=BigInt('0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798');
+const Gy=BigInt('0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8');
+const G=new Point(Gx,Gy);
+async function decodeWIF(wif){
+  let decoded=base58Decode(wif);
+  if(decoded.length!==37 && decoded.length!==38) throw new Error('Invalid WIF length');
+  let checksum=decoded.slice(-4); let payload=decoded.slice(0,-4);
+  let check=await doubleSha256(payload);
+  for(let i=0;i<4;i++) if(check[i]!==checksum[i]) throw new Error('Invalid WIF checksum');
+  if(payload[0]!==0x80) throw new Error('Invalid prefix');
+  let compressed=false; let keyBytes;
+  if(payload.length===34){ if(payload[33]!==1) throw new Error('Invalid compressed flag'); compressed=true; keyBytes=payload.slice(1,33);} else { keyBytes=payload.slice(1); }
+  return {privateKey:bytesToBigInt(keyBytes), compressed};
+}
+async function getAddressFromPubkey(point,compressed=true){
+  let pub;
+  if(compressed){ pub=concatBytes(Uint8Array.of(point.y%2n===0n?2:3),bigIntToBytes(point.x,32)); }
+  else{ pub=concatBytes(Uint8Array.of(4),bigIntToBytes(point.x,32),bigIntToBytes(point.y,32)); }
+  let sha=await sha256(pub); let h160=ripemd160(sha); let raw=concatBytes(Uint8Array.of(0),h160); let checksum=await doubleSha256(raw); let addressBin=concatBytes(raw,checksum.slice(0,4)); return base58Encode(addressBin);
+}
+function randomK(){ let arr=new Uint8Array(32); crypto.getRandomValues(arr); return bytesToBigInt(arr)%N || 1n; }
+async function signBitcoinMessage(message, key, compressed=true){
+  let z=bytesToBigInt(await bitcoinMessageHash(message));
+  while(true){
+    let k=randomK();
+    let R=G.multiply(k); let r=R.x%N; if(r===0n) continue;
+    let kInv=modInv(k,N); let s=(kInv*(z+r*key))%N; if(s===0n) continue;
+    let rec=(R.y%2n===0n?0:1)+(R.x>=N?2:0); if(s>N/2n){ s=N-s; rec^=1; }
+    let header=27+rec+(compressed?4:0); let sig=concatBytes(Uint8Array.of(header),bigIntToBytes(r,32),bigIntToBytes(s,32));
+    let signatureB64=btoa(String.fromCharCode(...sig)); let publicPoint=G.multiply(key); let address=await getAddressFromPubkey(publicPoint,compressed); return {signature:signatureB64,address};
+  }
+}
+async function verifyBitcoinSignature(message, signatureB64, address){
+  try{
+    let sig=Uint8Array.from(atob(signatureB64),c=>c.charCodeAt(0));
+    if(sig.length!==65) return false; let header=sig[0]; let r=bytesToBigInt(sig.slice(1,33)); let s=bytesToBigInt(sig.slice(33)); if(header<27||header>42||s>N/2n) return false; let compressed=header>=31; let rec=header-27; if(compressed) rec-=4; let z=bytesToBigInt(await bitcoinMessageHash(message)); let x=r+BigInt(Math.floor(rec/2))*N; if(x>=P) return false; let ySq=(x**3n + A*x + B)%P; let y=modPow(ySq,(P+1n)/4n,P); if((y*y)%P!==ySq) return false; if(y%2n!==BigInt(rec%2)) y=P-y; let R=new Point(x,y); let rInv=modInv(r,N); let sr=(s*rInv)%N; let zr=(z*rInv)%N; let minus_zG=G.multiply((N-zr)%N); let sR=R.multiply(sr); let Q=sR.add(minus_zG); let recovered=await getAddressFromPubkey(Q,compressed); return recovered===address; }catch(e){ return false; }
+}
+function modPow(base,exp,mod){ let res=1n; base%=mod; while(exp>0n){ if(exp&1n) res=(res*base)%mod; base=(base*base)%mod; exp>>=1n; } return res; }
+async function handleSign(){
+  let msg=document.getElementById('sign-message').value;
+  let keyInput=document.getElementById('sign-priv').value.trim();
+  if(!msg||!keyInput) return;
+  let key,compressed=true;
+  try{ key=BigInt('0x'+keyInput); }catch{ let info=await decodeWIF(keyInput); key=info.privateKey; compressed=info.compressed; }
+  let res=await signBitcoinMessage(msg,key,compressed);
+  document.getElementById('sign-output').innerText='Signature: '+res.signature+'\nAddress: '+res.address;
+}
+async function handleVerify(){
+  let msg=document.getElementById('verify-message').value;
+  let sig=document.getElementById('verify-signature').value.trim();
+  let addr=document.getElementById('verify-address').value.trim();
+  if(!msg||!sig||!addr) return;
+  let ok=await verifyBitcoinSignature(msg,sig,addr);
+  document.getElementById('verify-output').innerText='Signature is '+(ok?'VALID':'INVALID');
+}
+document.getElementById('sign-btn').onclick=()=>{handleSign();};
+document.getElementById('verify-btn').onclick=()=>{handleVerify();};
+</script>
+</body>
+</html>
